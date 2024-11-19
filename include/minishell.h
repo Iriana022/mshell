@@ -6,7 +6,7 @@
 /*   By: irazafim <irazafim@student.42antananari    +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2024/09/07 12:13:57 by pmihangy          #+#    #+#             */
-/*   Updated: 2024/11/18 16:49:51 by irazafim         ###   ########.fr       */
+/*   Updated: 2024/11/19 13:16:04 by irazafim         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
@@ -22,9 +22,12 @@
 # include <readline/history.h>
 # include <sys/types.h>
 # include <sys/wait.h>
+# include <sys/stat.h>
 # include <dirent.h>
 # include <errno.h>
 # include <libft.h>
+
+extern pid_t	g_signal_pid;
 
 /* defines structures and enums */
 

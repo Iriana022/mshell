@@ -6,11 +6,23 @@
 /*   By: irazafim <irazafim@student.42antananari    +#+  +:+       +#+        */
 /*                                                +#+#+#+#+#+   +#+           */
 /*   Created: 2024/09/07 12:13:11 by pmihangy          #+#    #+#             */
-/*   Updated: 2024/11/18 17:39:53 by irazafim         ###   ########.fr       */
+/*   Updated: 2024/11/19 16:00:43 by irazafim         ###   ########.fr       */
 /*                                                                            */
 /* ************************************************************************** */
 
 #include <minishell.h>
+
+pid_t	g_signal_pid;
+
+int	ft_cd(t_minishell *mshell, char **params);
+bool	export(char *str, t_lst **env);
+int	ft_export(char **str, t_lst **env);
+int	ft_pwd(void);
+int	ft_echo(char **args);
+int	ft_unset(char **str, t_lst **env);
+void	ft_exit(t_minishell *mshell, char **args);
+char	**lst_to_arr(t_lst *env);
+int	exist(char *str, t_lst *env);
 
 bool	print_error(char *str)
 {
@@ -36,13 +48,33 @@ int	is_space(const char c)
 	return (c == 32 || (c > 8 && c < 14));
 }
 
+size_t	len_cmd(t_cmd *list)
+{
+	t_cmd	*tmp;
+	size_t	i;
+
+	if ((list))
+	{
+		tmp = list;
+		i = 1;
+		while (tmp->next != list)
+		{
+			++i;
+			tmp = tmp->next;
+		}
+		return (i);
+	}
+	return (0);
+}
+
 void	handle_sigint(int signum)
 {
 	(void)signum;
 	printf("\n");
 	rl_replace_line("", 0);
 	rl_on_new_line();
-	rl_redisplay();
+	if (g_signal_pid == 0)
+		rl_redisplay();
 }
 
 void	listen_signals(void)
@@ -59,6 +91,7 @@ void	init_minishell(t_minishell *mshell)
 	mshell->exit_code = 0;
 	mshell->pipefd[0] = -1;
 	mshell->pipefd[1] = -1;
+	g_signal_pid = 0;
 }
 
 void	free_lst(t_lst **list)
@@ -218,6 +251,8 @@ void	free_mshell(t_minishell *mshell)
 	if (mshell->pipefd[1] > 0)
 		close(mshell->pipefd[1]);
 	rl_clear_history();
+	if (!access(".heredoc.tmp", F_OK))
+		unlink(".heredoc.tmp");
 }
 
 bool	is_empty(char *entry)
@@ -950,6 +985,504 @@ int	append_cmd(t_cmd **list, int infile, int outfile, char **cmd_param)
 	return (1);
 }
 
+//swap to elems in array
+static void	ft_swap_str_tab(int i, int j, char **tab)
+{
+	char	*temp;
+
+	temp = tab[i];
+	tab[i] = tab[j];
+	tab[j] = temp;
+}
+
+//sorts array
+void	sort_array(char **arr, int len)
+{
+	int	i;
+	int	j;
+	int	diff;
+
+	i = 0;
+	while (i < len)
+	{
+		j = i + 1;
+		while (j < len)
+		{
+			diff = ft_strncmp(arr[i], arr[j], __INT_MAX__);
+			if (diff > 0)
+			{
+				ft_swap_str_tab(i, j, arr);
+				continue ;
+			}
+			j++;
+		}
+	i++;
+	}
+}
+
+/* cd */
+
+int	count_arg(char **params)
+{
+	int	count;
+
+	count = 0;
+	while (params[count])
+		count++;
+	return (count);
+}
+
+void	error_malloc(void)
+{
+	print_error("Malloc error\n");
+	return ;
+}
+
+void	update_oldpwd(t_minishell *mshell)
+{
+	t_lst	*tmp;
+	char	*test;
+	int		len;
+
+	tmp = mshell->env;
+	test = NULL;
+	len = len_list(tmp);
+	while (len--)
+	{
+		if (ft_strncmp(tmp->text, "PWD=", 3) == 0)
+			test = tmp->text;
+		tmp = tmp->next;
+	}
+	if (!test)
+		export("OLDPWD", &mshell->env);
+	if (test)
+	{
+		test = ft_strjoin("OLD", test);
+		if (!test)
+			return (error_malloc());
+		export(test, &mshell->env);
+	}
+	free(test);
+}
+
+void	update_pwd(t_minishell *mshell, char *param)
+{
+	char	cwd[PATH_MAX];
+	char	*pwd;
+
+	update_oldpwd(mshell);
+	if (getcwd(cwd, PATH_MAX) == NULL)
+	{
+		perror(param);
+		return ;
+	}
+	pwd = ft_strjoin("PWD=", cwd);
+	if (!pwd)
+		return (error_malloc());
+	export(pwd, &mshell->env);
+	free(pwd);
+}
+
+int	ft_cd(t_minishell *mshell, char **params)
+{
+	int	res;
+
+	if (count_arg(params) == 2)
+	{
+		res = chdir(params[1]);
+		if (res == 0)
+			update_pwd(mshell, params[1]);
+		if (res == -1)
+			res *= -1;
+		if (res == 1)
+			perror(params[1]);
+		return (res);
+	}
+	return (1);
+}
+
+/* echo */
+
+int	check_new_line(char *str)
+{
+	int	i;
+
+	i = 0;
+	if (str[i] && str[i] == '-')
+	{
+		++i;
+		while (str[i] && str[i] == 'n')
+			i++;
+		if (i == (int)ft_strlen(str))
+			return (1);
+	}
+	return (0);
+}
+
+void	write_echo(int count, int i, bool new_line, char **args)
+{
+	while (args[i] && check_new_line(args[i]))
+	{
+		++i;
+		new_line = false;
+	}
+	while (i < count)
+	{
+		write(1, args[i], ft_strlen(args[i]));
+		if (i != count - 1)
+			write(1, " ", 1);
+		++i;
+	}
+	if (new_line)
+		write(1, "\n", 1);
+}
+
+int	ft_echo(char **args)
+{
+	int		count;
+	int		i;
+	bool	new_line;
+
+	count = 0;
+	while (args[count])
+		++count;
+	i = 1;
+	new_line = true;
+	write_echo(count, i, new_line, args);
+	return (0);
+}
+
+/* env */
+
+int	ft_env(t_lst *env)
+{
+	t_lst	*temp;
+
+	temp = env;
+	if (!temp)
+		return (0);
+	if (ft_strchr(temp->text, '='))
+		printf("%s\n", temp->text);
+	temp = temp->next;
+	while (temp != env)
+	{
+		if (ft_strchr(temp->text, '='))
+			printf("%s\n", temp->text);
+		temp = temp->next;
+	}
+	return (0);
+}
+
+/* exit */
+
+static int	almost_atoi(char *str, int *err)
+{
+	unsigned long long	ret;
+	int					i;
+	int					j;
+	int					pn;
+
+	i = 0;
+	while ((9 <= str[i] && str[i] <= 13) || str[i] == 32)
+		i++;
+	pn = 1;
+	if (str[i] == '+' || str[i] == '-')
+		if (str[i++] == '-')
+			pn = -1;
+	j = i;
+	ret = 0;
+	while ('0' <= str[i] && str[i] <= '9')
+		ret = ret * 10 + (str[i++] - 48);
+	while ((9 <= str[i] && str[i] <= 13) || str[i] == 32)
+		i++;
+	if (str[i] || i - j > 20 || ((pn == -1 && (ret - 1) > LONG_MAX) || \
+		(pn == 1 && (ret > LONG_MAX))))
+		*err = 1;
+	return ((int)((ret * pn) % 256));
+}
+
+void	ft_exit(t_minishell *mshell, char **args)
+{
+	int	ret;
+	int	err;
+
+	ret = 0;
+	err = 0;
+	if (args[1])
+	{
+		ret = almost_atoi(args[1], &err);
+		if (err)
+		{
+			print_error("exit: ");
+			print_error(args[1]);
+			print_error(": numeric argument required\n");
+			free_mshell(mshell);
+		}
+	}
+	if (args[1] && args[2])
+	{
+		print_error("exit: too many arguments\n");
+		mshell->exit_code = 1;
+		return ;
+	}
+	if (!args[1])
+		free_mshell(mshell);
+	free_mshell(mshell);
+}
+
+/* export */
+
+//if export and no other args
+bool	export_no_args(t_lst *env)
+{
+	char	**arr;
+	int		i;
+	int		j;
+
+	arr = lst_to_arr(env);
+	if (!arr)
+		return (false);
+	sort_array(arr, len_list(env));
+	i = 0;
+	while (arr[i])
+	{
+		printf("declare -x ");
+		j = 0;
+		while (arr[i][j] && arr[i][j] != '=')
+			printf("%c", arr[i][j++]);
+		if (arr[i][j] && arr[i][j] == '=')
+			printf("=\"%s\"\n", &arr[i][j + 1]);
+		else
+			printf("\n");
+		i++;
+	}
+	free(arr);
+	return (true);
+}
+
+//checks syntax
+bool	valid_identifier(char *str)
+{
+	int	i;
+
+	i = 0;
+	if (!str[0] || (str[0] != '_' && !ft_isalpha(str[0])))
+		return (false);
+	while (str[i] && str[i] != '=')
+	{
+		if (!ft_isalnum(str[i]) && str[i] != '_')
+			return (false);
+		i++;
+	}
+	return (true);
+}
+
+//checks if identifier already in env
+// int	exist(char *str, t_lst *env)
+// {
+// 	int		i;
+// 	int		j;
+// 	t_lst	*tmp;
+
+// 	if (!env)
+// 		return (-1);
+// 	i = 0;
+// 	while (str[i] && str[i] != '=')
+// 		i++;
+// 	j = 0;
+// 	tmp = env;
+// 	if (!ft_strncmp(tmp->text, str, i) && (tmp->text[i] == '\0' || \
+// 		tmp->text[i] == '='))
+// 		return (j);
+// 	tmp = tmp->next;
+// 	j++;
+// 	while (tmp != env)
+// 	{
+// 		if (!ft_strncmp(tmp->text, str, i) && (tmp->text[i] == '\0' || \
+// 			tmp->text[i] == '='))
+// 			return (j);
+// 		tmp = tmp->next;
+// 		j++;
+// 	}
+// 	return (-1);
+// }
+
+//export but norm
+bool	export(char *str, t_lst **env)
+{
+	int		pos;
+	int		i;
+	char	*value;
+
+	pos = exist(str, (*env));
+	value = ft_strdup(str);
+	if (!value)
+		return (false);
+	if (pos >= 0)
+	{
+		i = 0;
+		while (i < pos)
+		{
+			(*env) = (*env)->next;
+			i++;
+		}
+		free((*env)->text);
+		(*env)->text = value;
+	}
+	else if (pos == -1)
+		if (!lst_append(env, value))
+			return (false);
+	return (true);
+}
+
+int	ft_export(char **str, t_lst **env)
+{
+	int	exit_code;
+	int	i;
+
+	exit_code = 0;
+	i = 1;
+	if (!str || !str[i])
+	{
+		if (*env && !export_no_args((*env)))
+			return (print_error("malloc error\n"));
+		return (0);
+	}
+	while (str[i])
+	{
+		if (!valid_identifier(str[i]))
+		{
+			print_error("export: invalid identifier\n");
+			exit_code = 1;
+		}
+		else if (!export(str[i], env))
+			return (print_error("malloc error\n"));
+		i++;
+	}
+	return (exit_code);
+}
+
+/* pwd */
+
+int	ft_pwd(void)
+{
+	char	cwd[PATH_MAX];
+
+	if (getcwd(cwd, PATH_MAX))
+	{
+		printf("%s\n", cwd);
+		return (0);
+	}
+	else
+	{
+		perror("pwd");
+		return (1);
+	}
+}
+
+/* unset */
+
+//syntax
+bool	syntax(char *str)
+{
+	int	i;
+
+	if (str[0] != '_' && !ft_isalpha(str[0]))
+		return (false);
+	i = 0;
+	while (str[i])
+	{
+		if (!ft_isalnum(str[i]) && str[i] != '_')
+			return (false);
+		i++;
+	}
+	return (true);
+}
+
+//checks if identifier already in env
+int	exist(char *str, t_lst *env)
+{
+	int		i;
+	int		j;
+	t_lst	*tmp;
+
+	if (!env)
+		return (-1);
+	i = 0;
+	while (str[i])
+		i++;
+	j = 0;
+	tmp = env;
+	if (!ft_strncmp(tmp->text, str, i))
+		return (j);
+	tmp = tmp->next;
+	j++;
+	while (tmp != env)
+	{
+		if (!ft_strncmp(tmp->text, str, i))
+			return (j);
+		tmp = tmp->next;
+		j++;
+	}
+	return (-1);
+}
+
+
+void	check_env(t_lst *tmp, t_lst **env)
+{
+	if (tmp == (*env))
+		(*env) = tmp->next;
+	if (tmp->next == tmp)
+		(*env) = NULL;
+}
+
+bool	unset(char *str, t_lst **env)
+{
+	int		pos;
+	int		i;
+	t_lst	*tmp;
+
+	if (!str || !(*str))
+		return (false);
+	if (!syntax(str))
+	{
+		print_error("unset: invalid identifier\n");
+		return (true);
+	}
+	pos = exist(str, (*env));
+	if (pos == -1)
+		return (false);
+	tmp = (*env);
+	i = 0;
+	while (i++ < pos)
+		tmp = tmp->next;
+	tmp->prev->next = tmp->next;
+	tmp->next->prev = tmp->prev;
+	free(tmp->text);
+	check_env(tmp, env);
+	free(tmp);
+	tmp = NULL;
+	return (false);
+}
+
+int	ft_unset(char **str, t_lst **env)
+{
+	int	exit_code;
+	int	i;
+
+	exit_code = 0;
+	i = 0;
+	while (str[i])
+	{
+		if (unset(str[i], env))
+			exit_code = 1;
+		i++;
+	}
+	return (exit_code);
+}
+
+/* endbuiltins*/
+
 bool	norm(t_minishell *mshell, t_token *tmp)
 {
 	if (!append_cmd(&mshell->cmd, -2, -2, NULL))
@@ -982,6 +1515,18 @@ bool	create_list_cmd(t_minishell *mshell)
 	return (true);
 }
 
+bool	check_pipe(t_minishell *mshell)
+{
+	if (mshell->token->id == PIPE)
+	{
+		write(2, "syntax error near unexpected token '|'\n", 39);
+		free_token(&mshell->token);
+		free_cmd(&mshell->cmd);
+		return (false);
+	}
+	return (true);
+}
+
 void	parse(t_minishell *mshell, char *entry)
 {
 	char	*err_message;
@@ -998,9 +1543,359 @@ void	parse(t_minishell *mshell, char *entry)
 		free_token(&mshell->token);
 		return ;
 	}
-	if (!mshell->token)
-		create_list_cmd(mshell);
-	// print_list_cmd(mshell->cmd);
+	if (mshell->token)
+	{
+		// TODO: manage if has an error
+		create_list_cmd(mshell);		
+	}
+	// TODO: manage if has an error
+	check_pipe(mshell);
+}
+
+
+
+
+bool	is_builtin(char *cmd)
+{
+	if (!cmd)
+		return (false);
+	if (!ft_strncmp("echo", cmd, INT_MAX) || !ft_strncmp("cd", cmd, INT_MAX) \
+	|| !ft_strncmp("pwd", cmd, INT_MAX) || !ft_strncmp("export", cmd, INT_MAX) \
+	|| !ft_strncmp("unset", cmd, INT_MAX) || !ft_strncmp("env", cmd, INT_MAX) \
+	|| !ft_strncmp("exit", cmd, INT_MAX))
+		return (true);
+	return (false);
+}
+
+void	exec_builtin(int save_stdout, t_minishell *mshell, t_cmd *cmd)
+{
+	if (!ft_strncmp("echo", cmd->cmd_param[0], INT_MAX))
+		mshell->exit_code = ft_echo(cmd->cmd_param);
+	else if (!ft_strncmp("cd", cmd->cmd_param[0], INT_MAX))
+		mshell->exit_code = ft_cd(mshell, cmd->cmd_param);
+	else if (!ft_strncmp("pwd", cmd->cmd_param[0], INT_MAX))
+		mshell->exit_code = ft_pwd();
+	else if (!ft_strncmp("export", cmd->cmd_param[0], INT_MAX))
+		mshell->exit_code = ft_export(cmd->cmd_param, &mshell->env);
+	else if (!ft_strncmp("unset", cmd->cmd_param[0], INT_MAX))
+		mshell->exit_code = ft_unset(cmd->cmd_param, &mshell->env);
+	else if (!ft_strncmp("env", cmd->cmd_param[0], INT_MAX))
+		mshell->exit_code = ft_env(mshell->env);
+	else if (!ft_strncmp("exit", cmd->cmd_param[0], INT_MAX))
+	{
+		if (cmd->out >= 0)
+		{
+			dup2(save_stdout, 1);
+			close(save_stdout);
+		}
+		ft_exit(mshell, cmd->cmd_param);
+	}
+}
+
+bool	launch_builtin(t_minishell *mshell, t_cmd *cmd)
+{
+	int	save_stdout;
+
+	save_stdout = -1;
+	if (cmd->out >= 0)
+	{
+		save_stdout = dup(1);
+		dup2(cmd->out, 1);
+	}
+	exec_builtin(save_stdout, mshell, cmd);
+	if (cmd->out >= 0)
+	{
+		dup2(save_stdout, 1);
+		close (save_stdout);
+	}
+	return (true);
+}
+
+
+void	parent_process(t_minishell *mshell, t_cmd *cmd, int *pip)
+{
+	if (cmd->in >= 0)
+		close(cmd->in);
+	if (cmd->in == -2)
+		cmd->in = pip[0];
+	if (cmd->next != mshell->cmd && cmd->next->in == -2)
+		cmd->next->in = pip[0];
+	else
+		close(pip[0]);
+}
+
+void	built(int *pip, t_cmd *cmd, t_minishell *mshell)
+{
+	close(pip[0]);
+	if (cmd->out < 0 && cmd->next != mshell->cmd)
+		cmd->out = pip[1];
+	else
+		close(pip[1]);
+	launch_builtin(mshell, cmd);
+}
+
+char	*create_paths(t_lst *env, int len)
+{
+	t_lst	*tmp;
+
+	tmp = env;
+	while (len--)
+	{
+		if (ft_strncmp(tmp->text, "PATH=", 5) == 0)
+			return (&(tmp->text[5]));
+		tmp = tmp->next;
+	}
+	return (NULL);
+}
+
+char	*cmd_not_found(char *sample)
+{
+	write(2, sample, ft_strlen(sample));
+	write(2, " : command not found\n", 21);
+	return (NULL);
+}
+
+int	ft_strslashjoin(char *dest, char *str, char *env, int *index)
+{
+	int			i;
+	int			j;
+
+	i = 0;
+	while (*index < (PATH_MAX - 1) && env[(*index)] && env[(*index)] != ':')
+		dest[i++] = env[(*index)++];
+	++(*index);
+	dest[i++] = '/';
+	j = 0;
+	while (j < (PATH_MAX - 1) && str[j])
+		dest[i++] = str[j++];
+	dest[i] = '\0';
+	return (0);
+}
+
+char	*find_cmd(t_minishell *mshell, char *sample, t_lst *env)
+{
+	char		*paths;
+	char		path[PATH_MAX];
+	int			i;
+	int			len;
+
+	paths = create_paths(env, len_list(env));
+	if (!paths || ft_strlen(sample) > PATH_MAX / 2)
+		return (cmd_not_found(sample));
+	i = 0;
+	len = ft_strlen(paths);
+	while (i < len)
+	{
+		ft_strslashjoin(path, sample, paths, &i);
+		if (access(path, F_OK) == 0)
+		{
+			sample = ft_strdup(path);
+			if (!sample)
+			{
+				print_error("Malloc error");
+				mshell->exit_code = -1;
+			}
+			return (sample);
+		}
+	}
+	return (cmd_not_found(sample));
+}
+
+void	absolute_path(char **path, char *cmd, t_minishell *mshell)
+{
+	*path = ft_strdup(cmd);
+	if (!(*path))
+		free_mshell(mshell);
+	if (access((*path), F_OK))
+	{
+		write(2, (*path), ft_strlen((*path)));
+		write(2, " : command not found\n", 21);
+		free(*path);
+		*path = NULL;
+	}
+}
+
+bool	check_dir(char **path, char *cmd, t_minishell *mshell)
+{
+	struct stat	path_stat;
+
+	stat(*path, &path_stat);
+	if (!S_ISREG(path_stat.st_mode))
+	{
+		print_error(cmd);
+		print_error(" : Is a directory\n");
+		mshell->exit_code = 126;
+		return (false);
+	}
+	return (true);
+}
+
+bool	cmd_exist(char **path, t_minishell *mshell, char *cmd)
+{
+	if (!ft_strchr(cmd, '/'))
+		*path = find_cmd(mshell, cmd, mshell->env);
+	else
+		absolute_path(path, cmd, mshell);
+	if (!(*path) && mshell->exit_code == -1)
+		free_mshell(mshell);
+	if (!(*path))
+	{
+		mshell->exit_code = 127;
+		return (false);
+	}
+	if (access((*path), X_OK))
+	{
+		perror(*path);
+		free((*path));
+		(*path) = NULL;
+		mshell->exit_code = 126;
+		return (false);
+	}
+	if (!check_dir(path, cmd, mshell))
+		return (false);
+	return (true);
+}
+
+void	redirect_in_out(t_minishell *mshell, t_cmd *cmd, int *pip)
+{
+	close(pip[0]);
+	if (cmd->in >= 0)
+	{
+		dup2(cmd->in, 0);
+		close(cmd->in);
+	}
+	if (cmd->out >= 0)
+	{
+		dup2(cmd->out, 1);
+		close(cmd->out);
+	}
+	else if (cmd->next != mshell->cmd)
+		dup2(pip[1], 1);
+	close(pip[1]);
+}
+
+//Transform lst to array
+char	**lst_to_arr(t_lst *env)
+{
+	t_lst	*lst;
+	char	**dest;
+	int		i;
+
+	dest = NULL;
+	i = 0;
+	lst = env;
+	dest = (char **)malloc(sizeof(char *) * (len_list(lst) + 1));
+	if (!dest)
+		return (NULL);
+	dest[i] = (lst->text);
+	lst = lst->next;
+	i++;
+	while (lst != env)
+	{
+		dest[i] = (lst->text);
+		lst = lst->next;
+		i++;
+	}
+	dest[i] = NULL;
+	return (dest);
+}
+
+void	signals2(void)
+{
+	signal(SIGQUIT, SIG_DFL);
+}
+
+void	child_process(t_minishell *mshell, t_cmd *cmd, int *pip)
+{
+	char	*path;
+	char	**env;
+
+	path = NULL;
+	if (cmd->skip_cmd)
+		mshell->exit_code = 1;
+	else if (is_builtin(cmd->cmd_param[0]))
+		built(pip, cmd, mshell);
+	else if (cmd_exist(&path, mshell, cmd->cmd_param[0]))
+	{
+		redirect_in_out(mshell, cmd, pip);
+		env = lst_to_arr(mshell->env);
+		if (!env)
+			free_mshell(mshell);
+		rl_clear_history();
+		signals2();
+		execve(path, cmd->cmd_param, env);
+		free(env);
+	}
+	if (path)
+		free(path);
+	free_mshell(mshell);
+}
+
+bool	exec_cmd(t_minishell *mshell, t_cmd *cmd, int *pip)
+{
+	g_signal_pid = fork();
+	if (g_signal_pid < 0)
+		free_mshell(mshell);
+	else if (!g_signal_pid)
+	{
+		if (cmd->cmd_param && cmd->cmd_param[0])
+			child_process(mshell, cmd, pip);
+		else
+			free_mshell(mshell);
+	}
+	else
+		parent_process(mshell, cmd, pip);
+	return (true);
+}
+
+void	wait_all(t_minishell *mshell)
+{
+	int		status;
+	int		pid;
+	int		len;
+	t_cmd	*tmp;
+
+	tmp = mshell->cmd;
+	len = len_cmd(tmp);
+	while (len--)
+	{
+		pid = waitpid(0, &status, 0);
+		if (pid == g_signal_pid)
+		{
+			if (WIFEXITED(status))
+				mshell->exit_code = WEXITSTATUS(status);
+		}
+		if (tmp->out >= 0)
+			close(tmp->out);
+		if (tmp->in >= 0)
+			close(tmp->in);
+		tmp = tmp->next;
+	}
+}
+
+bool	exec_minishell(t_minishell *mshell)
+{
+	t_cmd	*tmp;
+	int		*pip;
+
+	pip = mshell->pipefd;
+	tmp = mshell->cmd;
+	if (tmp && tmp->skip_cmd == false && tmp->next == tmp && tmp->cmd_param[0] \
+		&& is_builtin(tmp->cmd_param[0]))
+		return (launch_builtin(mshell, tmp));
+	if (pipe(pip) == -1)
+		return (false);
+	exec_cmd(mshell, tmp, pip);
+	tmp = tmp->next;
+	while (tmp != mshell->cmd)
+	{
+		if (pipe(pip) == -1)
+			return (-1);
+		exec_cmd(mshell, tmp, pip);
+		tmp = tmp->next;
+	}
+	wait_all(mshell);
+	return (true);
 }
 
 int	main(int ac, char **av, char **env)
@@ -1033,11 +1928,15 @@ int	main(int ac, char **av, char **env)
 		else
 		{
 			add_history(entry);
+			// TODO: manage if has an error
 			parse(&mshell, entry);
-			// exec(&mshell);
+			// printf("in: %p\n", mshell.cmd);
+			// exit(69);
+			exec_minishell(&mshell);
 		}
-		free_token(&mshell.token);
 		free_cmd(&mshell.cmd);
+		free_token(&mshell.token);
+		g_signal_pid = 0;
 	}
 	rl_clear_history();
 	free_mshell(&mshell);
